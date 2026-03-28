@@ -352,26 +352,55 @@ const STATUS_STYLES = {
   pasado:  { bg:"#F5F5F5", color:"#757575", label:"Pasado ✓" },
 };
 
-function TripCard({ trip, onClick }) {
+function EditCoverModal({ trip, onClose, onSaved }) {
+  const [url, setUrl] = useState(trip.cover_url || "");
+  const [loading, setLoading] = useState(false);
+
+  async function save() {
+    setLoading(true);
+    try {
+      await sb(`trips?id=eq.${trip.id}`, {
+        method:"PATCH",
+        body: JSON.stringify({ cover_url: url || null }),
+        prefer: "return=minimal",
+      });
+      onSaved(url || null);
+    } catch(e) { alert(e.message); }
+    setLoading(false);
+  }
+
+  return (
+    <Modal title="Editar imagen del viaje 🖼️" onClose={onClose}>
+      <Input label="URL de imagen" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://..."/>
+      {url ? <div style={{ borderRadius:10, overflow:"hidden", marginBottom:14, height:120, background:`url(${url}) center/cover` }}/> : null}
+      <div style={{ fontSize:12, color:"var(--muted)", marginBottom:14 }}>
+        Podés usar imágenes de Unsplash, Google Photos (link directo), etc.
+      </div>
+      <Btn onClick={save} disabled={loading}>{loading ? "Guardando..." : "Guardar imagen"}</Btn>
+    </Modal>
+  );
+}
+
+function TripCard({ trip, onClick, onEditCover }) {
   const status = tripStatus(trip.start_date, trip.end_date);
   const ss = STATUS_STYLES[status];
   const colorIdx = trip.title.length % COVER_COLORS.length;
 
   return (
-    <div onClick={onClick} className="fade-up" style={{
+    <div className="fade-up" style={{
       background:"white", borderRadius:18, overflow:"hidden",
-      boxShadow:"var(--shadow)", cursor:"pointer", marginBottom:16,
+      boxShadow:"var(--shadow)", marginBottom:16,
       transition:"transform 0.15s, box-shadow 0.15s",
     }}
       onMouseEnter={e => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "var(--shadow-lg)"; }}
       onMouseLeave={e => { e.currentTarget.style.transform = ""; e.currentTarget.style.boxShadow = "var(--shadow)"; }}
     >
       {/* Cover */}
-      <div style={{
+      <div onClick={onClick} style={{
         height:140, background: trip.cover_url
           ? `url(${trip.cover_url}) center/cover`
           : `linear-gradient(135deg, ${COVER_COLORS[colorIdx]} 0%, ${COVER_COLORS[(colorIdx+2)%COVER_COLORS.length]} 100%)`,
-        display:"flex", alignItems:"flex-end", padding:14, position:"relative",
+        display:"flex", alignItems:"flex-end", padding:14, position:"relative", cursor:"pointer",
       }}>
         <div style={{
           position:"absolute", inset:0,
@@ -379,13 +408,20 @@ function TripCard({ trip, onClick }) {
         }}/>
         <div style={{
           fontFamily:"Nunito", fontWeight:900, fontSize:22, color:"white",
-          textShadow:"0 2px 8px rgba(0,0,0,0.3)", position:"relative", lineHeight:1.1,
+          textShadow:"0 2px 8px rgba(0,0,0,0.3)", position:"relative", lineHeight:1.1, flex:1,
         }}>
           {trip.title}
         </div>
+        <button onClick={e => { e.stopPropagation(); onEditCover(trip); }} style={{
+          position:"relative", background:"rgba(255,255,255,0.2)", border:"1px solid rgba(255,255,255,0.4)",
+          borderRadius:8, padding:"5px 10px", color:"white", fontSize:12, fontWeight:600,
+          backdropFilter:"blur(4px)", flexShrink:0,
+        }}>
+          🖼️ Foto
+        </button>
       </div>
       {/* Info */}
-      <div style={{ padding:"12px 16px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+      <div onClick={onClick} style={{ padding:"12px 16px", display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer" }}>
         <div style={{ fontSize:13, color:"var(--muted)" }}>
           {fmtDate(trip.start_date)} → {fmtDate(trip.end_date)}
         </div>
@@ -404,6 +440,7 @@ function AddTripModal({ onClose, onCreated, userId }) {
   const [title, setTitle] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [coverUrl, setCoverUrl] = useState("");
   const [loading, setLoading] = useState(false);
 
   async function create() {
@@ -412,7 +449,7 @@ function AddTripModal({ onClose, onCreated, userId }) {
     try {
       const [trip] = await sb("trips", {
         method:"POST",
-        body: JSON.stringify({ title, start_date: startDate, end_date: endDate, owner_id: userId, status:"active" }),
+        body: JSON.stringify({ title, start_date: startDate, end_date: endDate, owner_id: userId, status:"active", cover_url: coverUrl || null }),
       });
       // Auto-generate days
       const d1 = new Date(startDate + "T12:00:00");
@@ -434,6 +471,8 @@ function AddTripModal({ onClose, onCreated, userId }) {
       <Input label="Destino / Título" value={title} onChange={e => setTitle(e.target.value)} placeholder="Ej: Panamá City"/>
       <Input label="Fecha de inicio" type="date" value={startDate} onChange={e => setStartDate(e.target.value)}/>
       <Input label="Fecha de fin" type="date" value={endDate} onChange={e => setEndDate(e.target.value)}/>
+      <Input label="URL de imagen (opcional)" value={coverUrl} onChange={e => setCoverUrl(e.target.value)} placeholder="https://..."/>
+      {coverUrl ? <div style={{ borderRadius:10, overflow:'hidden', marginBottom:14, height:100, background:`url(${coverUrl}) center/cover` }}/> : null}
       <Btn onClick={create} disabled={loading || !title || !startDate || !endDate}>
         {loading ? "Creando..." : "Crear viaje"}
       </Btn>
@@ -445,6 +484,7 @@ function TripsScreen({ session, onSelectTrip }) {
   const [trips, setTrips] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
+  const [editCoverTrip, setEditCoverTrip] = useState(null);
 
   useEffect(() => {
     loadTrips();
@@ -470,7 +510,10 @@ function TripsScreen({ session, onSelectTrip }) {
       });
       all.sort((a,b) => {
         const order = { actual:0, próximo:1, pasado:2 };
-        return (order[tripStatus(a.start_date, a.end_date)] ?? 3) - (order[tripStatus(b.start_date, b.end_date)] ?? 3);
+        const sa = tripStatus(a.start_date, a.end_date);
+        const sb2 = tripStatus(b.start_date, b.end_date);
+        if (order[sa] !== order[sb2]) return order[sa] - order[sb2];
+        return a.start_date.localeCompare(b.start_date);
       });
       setTrips(all);
     } catch(e) { console.error(e); }
@@ -510,7 +553,7 @@ function TripsScreen({ session, onSelectTrip }) {
             <div style={{ fontSize:14, marginTop:4 }}>¡Creá tu primer aventura!</div>
           </div>
         ) : trips.map(t => (
-          <TripCard key={t.id} trip={t} onClick={() => onSelectTrip(t)}/>
+          <TripCard key={t.id} trip={t} onClick={() => onSelectTrip(t)} onEditCover={setEditCoverTrip}/>
         ))}
       </div>
 
@@ -519,6 +562,16 @@ function TripsScreen({ session, onSelectTrip }) {
           userId={session.user.id}
           onClose={() => setShowAdd(false)}
           onCreated={trip => { setShowAdd(false); loadTrips(); }}
+        />
+      )}
+      {editCoverTrip && (
+        <EditCoverModal
+          trip={editCoverTrip}
+          onClose={() => setEditCoverTrip(null)}
+          onSaved={url => {
+            setTrips(prev => prev.map(t => t.id === editCoverTrip.id ? { ...t, cover_url: url } : t));
+            setEditCoverTrip(null);
+          }}
         />
       )}
     </div>
