@@ -5,10 +5,13 @@ const SUPABASE_URL = "https://kzkiktkcyaazubqagfaw.supabase.co";
 const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6a2lrdGtjeWFhenVicWFnZmF3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ3MjEyOTgsImV4cCI6MjA5MDI5NzI5OH0.vxn0EbPqtg8-L_xCHDz4Vm4aFBuKdbUkNWnof0gOMoM";
 
 async function sb(path, opts = {}) {
+  const session = JSON.parse(localStorage.getItem("jd_session") || "null");
+  const token = session?.access_token || SUPABASE_ANON;
+
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     headers: {
       apikey: SUPABASE_ANON,
-      Authorization: `Bearer ${SUPABASE_ANON}`,
+      Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
       Prefer: opts.prefer || "return=representation",
       ...opts.headers,
