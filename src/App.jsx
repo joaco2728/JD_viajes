@@ -482,12 +482,15 @@ function AddActModal({ dayId, onClose, onAdded }) {
 }
 
 // ─── TODAY TAB ────────────────────────────────────────────────────────────────
-function TodayTab({ trip }) {
+// If today matches a trip day -> delegate to ItineraryTab focused on today
+// If not -> show a "next upcoming day" preview
+function TodayTab({ trip, onSwitchToItinerary }) {
   const [todayDay, setTodayDay] = useState(null);
   const [acts, setActs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [toast, setToast] = useState(null);
+  const [isTripDay, setIsTripDay] = useState(false);
 
   useEffect(() => { load(); }, [trip.id]);
 
@@ -496,7 +499,15 @@ function TodayTab({ trip }) {
     try {
       const ds = await sb(`days?trip_id=eq.${trip.id}&order=date.asc`);
       const t = todayStr();
-      let target = ds.find(d => d.date === t) || ds.find(d => d.date > t) || ds[ds.length-1];
+      const exactToday = ds.find(d => d.date === t);
+      if (exactToday) {
+        // Today IS a trip day — switch to itinerary tab directly
+        setIsTripDay(true);
+        onSwitchToItinerary();
+        return;
+      }
+      // Not a trip day — show next upcoming or last
+      let target = ds.find(d => d.date > t) || ds[ds.length - 1];
       if (target) {
         setTodayDay(target);
         const a = await sb(`activities?day_id=eq.${target.id}&order=time.asc`);
@@ -511,40 +522,39 @@ function TodayTab({ trip }) {
     setActs(prev => prev.filter(a => a.id !== id));
   }
 
-  const isToday = todayDay?.date === todayStr();
   const now = nowHour();
-  const nextIdx = isToday ? acts.findIndex(a => timeToHour(a.time) > now) : -1;
+  const nextIdx = acts.findIndex(a => timeToHour(a.time) > now);
 
-  if (loading) return <Spinner/>;
+  if (loading || isTripDay) return <Spinner/>;
+
+  const isUpcoming = todayDay && todayDay.date > todayStr();
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%", overflowY:"auto" }}>
       <div style={{ padding:"14px 16px 12px", background:"white", borderBottom:"1px solid var(--border)" }}>
-        <div style={{ fontSize:12, color:"var(--muted)", fontWeight:600 }}>{isToday ? "Hoy" : "Proximo dia del viaje"}</div>
+        <div style={{ fontSize:12, color:"var(--muted)", fontWeight:600 }}>{isUpcoming ? "Proximo dia" : "Ultimo dia del viaje"}</div>
         <div style={{ fontFamily:"Nunito", fontWeight:900, fontSize:24, letterSpacing:"-0.5px", marginTop:2 }}>{fmtDayFull(todayDay?.date)}</div>
+        {todayDay?.title && <div style={{ fontSize:13, color:"var(--muted)", marginTop:2 }}>{todayDay.title}</div>}
       </div>
 
       <div style={{ padding:"12px 16px", flex:1 }}>
         {acts.length === 0 ? (
           <div style={{ textAlign:"center", padding:"48px 0", color:"var(--muted)" }}>
             <div style={{ fontSize:40, marginBottom:10 }}>📭</div>
-            <div style={{ fontWeight:700 }}>Sin actividades para hoy</div>
+            <div style={{ fontWeight:700 }}>Sin actividades cargadas</div>
           </div>
         ) : acts.map((a, i) => {
-          const isPast = isToday && timeToHour(a.time) > 0 && timeToHour(a.time) < now;
           const isNext = i === nextIdx;
           return (
             <div key={a.id} className="fade-up" style={{
               background:"white", borderRadius:16, marginBottom:10, overflow:"hidden",
               boxShadow: isNext ? "0 4px 20px rgba(255,214,0,0.35)" : "var(--shadow)",
               border: isNext ? "2px solid var(--yellow)" : "2px solid transparent",
-              opacity: isPast ? 0.5 : 1,
               display:"flex",
             }}>
               <div style={{ width:66, background:isNext?"var(--yellow)":"#FAFAFA", borderRight:"1px solid var(--border)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"12px 4px", flexShrink:0 }}>
                 <div style={{ fontSize:18 }}>{ACT_ICONS[a.type]||"📍"}</div>
                 <div style={{ fontSize:10, fontWeight:700, color:isNext?"var(--dark)":"var(--muted)", textAlign:"center", marginTop:4, lineHeight:1.2 }}>{a.time||"—"}</div>
-                {isNext && <div style={{ fontSize:9, fontWeight:800, color:"var(--dark)", marginTop:3, textTransform:"uppercase" }}>Ahora</div>}
               </div>
               <div style={{ padding:"12px", flex:1, minWidth:0 }}>
                 <div style={{ fontWeight:700, fontSize:14 }}>{a.title}</div>
@@ -691,54 +701,199 @@ function AddPlaceModal({ tripId, onClose, onAdded }) {
   );
 }
 
+// ── Leaflet map helper ────────────────────────────────────────────────────────
+function useLeaflet(mapRef, places) {
+  const mapInstanceRef = useRef(null);
+  const markersRef = useRef([]);
+
+  useEffect(() => {
+    if (!mapRef.current || places.length === 0) return;
+
+    // Load Leaflet CSS once
+    if (!document.getElementById("leaflet-css")) {
+      const link = document.createElement("link");
+      link.id = "leaflet-css";
+      link.rel = "stylesheet";
+      link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+      document.head.appendChild(link);
+    }
+
+    // Load Leaflet JS once then init map
+    function initMap(L) {
+      if (mapInstanceRef.current) {
+        // Already initialized — just update markers
+        markersRef.current.forEach(m => m.remove());
+        markersRef.current = [];
+        addMarkers(L, mapInstanceRef.current);
+        return;
+      }
+      // Use first place as center or fallback to world center
+      const first = places.find(p => p.lat && p.lng) || null;
+      const center = first ? [first.lat, first.lng] : [20, 0];
+      const map = L.map(mapRef.current, { zoomControl: true, attributionControl: false }).setView(center, first ? 14 : 2);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+      mapInstanceRef.current = map;
+      addMarkers(L, map);
+    }
+
+    function addMarkers(L, map) {
+      const validPlaces = places.filter(p => p.lat && p.lng);
+      if (validPlaces.length === 0) return;
+
+      const bounds = [];
+      validPlaces.forEach(p => {
+        const icon = L.divIcon({
+          html: `<div style="background:#FFD600;border:2.5px solid #111;border-radius:50% 50% 50% 0;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:15px;transform:rotate(-45deg);box-shadow:0 2px 8px rgba(0,0,0,0.25)"><span style="transform:rotate(45deg)">${CAT_ICONS[p.category]||"📍"}</span></div>`,
+          className: "", iconSize: [32, 32], iconAnchor: [16, 32],
+        });
+        const marker = L.marker([p.lat, p.lng], { icon })
+          .addTo(map)
+          .bindPopup(`<div style="font-family:sans-serif;min-width:140px"><strong style="font-size:13px">${p.name}</strong>${p.description ? `<div style="font-size:11px;color:#888;margin-top:4px">${p.description}</div>` : ""}${p.maps_url ? `<a href="${p.maps_url}" target="_blank" style="display:block;margin-top:6px;font-size:11px;font-weight:700;color:#1A73E8">Abrir Maps →</a>` : ""}</div>`);
+        markersRef.current.push(marker);
+        bounds.push([p.lat, p.lng]);
+      });
+      if (bounds.length > 1) map.fitBounds(bounds, { padding: [40, 40] });
+      else if (bounds.length === 1) map.setView(bounds[0], 15);
+    }
+
+    if (window.L) { initMap(window.L); return; }
+    const script = document.createElement("script");
+    script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+    script.onload = () => initMap(window.L);
+    document.head.appendChild(script);
+
+    return () => {
+      if (mapInstanceRef.current) { mapInstanceRef.current.remove(); mapInstanceRef.current = null; }
+    };
+  }, [places]);
+}
+
+// Geocode a place name using Nominatim (free, no key)
+async function geocode(name) {
+  try {
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(name)}&format=json&limit=1`, { headers: { "Accept-Language": "es" } });
+    const d = await r.json();
+    if (d.length) return { lat: parseFloat(d[0].lat), lng: parseFloat(d[0].lon) };
+  } catch(e) {}
+  return null;
+}
+
+function PlacesMap({ places }) {
+  const mapRef = useRef(null);
+  useLeaflet(mapRef, places);
+  return (
+    <div ref={mapRef} style={{ width:"100%", height:"100%", background:"#e8e8e8" }}/>
+  );
+}
+
 function PlacesTab({ trip }) {
   const [places, setPlaces] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
-  const [filter, setFilter] = useState("todos");
+  const [view, setView] = useState("map"); // "map" | "list"
+  const [selected, setSelected] = useState(null);
 
   useEffect(() => { load(); }, [trip.id]);
-  async function load() { setLoading(true); const ps = await sb(`places?trip_id=eq.${trip.id}&order=category.asc`); setPlaces(ps); setLoading(false); }
-  async function del(id) { await sb(`places?id=eq.${id}`, { method:"DELETE", prefer:"" }); setPlaces(prev => prev.filter(p => p.id!==id)); }
 
-  const cats = ["todos", ...new Set(places.map(p => p.category))];
-  const filtered = filter==="todos" ? places : places.filter(p => p.category===filter);
+  async function load() {
+    setLoading(true);
+    const ps = await sb(`places?trip_id=eq.${trip.id}&order=category.asc`);
+    // Geocode places that don't have coords yet
+    const enriched = await Promise.all(ps.map(async p => {
+      if (p.lat && p.lng) return p;
+      const coords = await geocode(p.name + " " + trip.title);
+      return { ...p, ...(coords || {}) };
+    }));
+    setPlaces(enriched);
+    setLoading(false);
+  }
+
+  async function del(id) {
+    await sb(`places?id=eq.${id}`, { method:"DELETE", prefer:"" });
+    setPlaces(prev => prev.filter(p => p.id !== id));
+    if (selected?.id === id) setSelected(null);
+  }
 
   if (loading) return <Spinner/>;
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%" }}>
-      {places.length>0 && (
-        <div style={{ display:"flex", gap:6, overflowX:"auto", padding:"10px 12px", background:"white", borderBottom:"1px solid var(--border)", flexShrink:0 }}>
-          {cats.map(c => (
-            <button key={c} onClick={() => setFilter(c)} style={{ flexShrink:0, border:"none", borderRadius:20, padding:"6px 14px", background:filter===c?"var(--dark)":"var(--bg)", color:filter===c?"white":"var(--muted)", fontSize:12, fontWeight:700, transition:"all 0.15s" }}>
-              {c==="todos"?"Todos":`${CAT_ICONS[c]||"📍"} ${c[0].toUpperCase()+c.slice(1)}`}
-            </button>
+      {/* Toggle map/list */}
+      <div style={{ display:"flex", background:"white", borderBottom:"1px solid var(--border)", padding:"8px 12px", gap:6, flexShrink:0, alignItems:"center", justifyContent:"space-between" }}>
+        <div style={{ display:"flex", background:"var(--bg)", borderRadius:10, padding:3 }}>
+          {[["map","🗺️ Mapa"],["list","☰ Lista"]].map(([v,l]) => (
+            <button key={v} onClick={() => setView(v)} style={{ border:"none", borderRadius:8, padding:"6px 14px", fontSize:13, fontWeight:700, background:view===v?"white":"transparent", color:view===v?"var(--dark)":"var(--muted)", boxShadow:view===v?"var(--shadow)":"none", transition:"all 0.15s" }}>{l}</button>
+          ))}
+        </div>
+        <button onClick={() => setShowAdd(true)} style={{ background:"var(--yellow)", border:"none", borderRadius:10, padding:"7px 14px", fontSize:13, fontWeight:800 }}>+ Lugar</button>
+      </div>
+
+      {/* Map view */}
+      {view === "map" && (
+        <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
+          {places.length === 0 ? (
+            <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"100%", color:"var(--muted)" }}>
+              <div style={{ fontSize:48, marginBottom:12 }}>🗺️</div>
+              <div style={{ fontWeight:700, fontSize:15 }}>Sin lugares todavia</div>
+              <div style={{ fontSize:13, marginTop:4 }}>Agrega el primero con el boton +</div>
+            </div>
+          ) : (
+            <>
+              <PlacesMap places={places}/>
+              {/* Bottom sheet: place chips */}
+              <div style={{ position:"absolute", bottom:0, left:0, right:0, background:"white", borderRadius:"16px 16px 0 0", boxShadow:"0 -4px 20px rgba(0,0,0,0.12)", padding:"10px 0 8px" }}>
+                <div style={{ display:"flex", gap:8, overflowX:"auto", padding:"0 12px", scrollbarWidth:"none" }}>
+                  {places.map(p => (
+                    <button key={p.id} onClick={() => setSelected(selected?.id===p.id ? null : p)} style={{
+                      flexShrink:0, border:"none", borderRadius:20, padding:"7px 14px",
+                      background: selected?.id===p.id ? "var(--dark)" : "var(--bg)",
+                      color: selected?.id===p.id ? "white" : "var(--dark)",
+                      fontSize:12, fontWeight:700, display:"flex", alignItems:"center", gap:6, transition:"all 0.15s",
+                    }}>
+                      {CAT_ICONS[p.category]||"📍"} {p.name}
+                    </button>
+                  ))}
+                </div>
+                {selected && (
+                  <div style={{ padding:"10px 16px 4px", display:"flex", alignItems:"center", gap:10 }}>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontWeight:700, fontSize:14 }}>{selected.name}</div>
+                      {selected.description && <div style={{ fontSize:12, color:"var(--muted)", marginTop:1 }}>{selected.description}</div>}
+                    </div>
+                    <div style={{ display:"flex", gap:8, flexShrink:0 }}>
+                      {selected.maps_url && <a href={selected.maps_url} target="_blank" rel="noopener" style={{ fontSize:12, fontWeight:800, color:"var(--blue)", textDecoration:"none", background:"#EBF5FF", padding:"7px 12px", borderRadius:10 }}>Maps</a>}
+                      <button onClick={() => del(selected.id)} style={{ background:"#FEE2E2", border:"none", borderRadius:10, padding:"7px 10px", fontSize:12, fontWeight:800, color:"var(--red)" }}>Borrar</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* List view */}
+      {view === "list" && (
+        <div style={{ flex:1, overflowY:"auto", padding:"12px 16px 16px" }}>
+          {places.length === 0 ? (
+            <div style={{ textAlign:"center", padding:"60px 0", color:"var(--muted)" }}>
+              <div style={{ fontSize:42, marginBottom:10 }}>🗺️</div>
+              <div style={{ fontWeight:700, fontSize:15 }}>Sin lugares todavia</div>
+            </div>
+          ) : places.map(p => (
+            <div key={p.id} className="fade-up" style={{ background:"white", borderRadius:16, padding:"14px", boxShadow:"var(--shadow)", marginBottom:10, display:"flex", gap:12, alignItems:"flex-start" }}>
+              <div style={{ width:44, height:44, borderRadius:12, background:"var(--yellow-pale)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, flexShrink:0 }}>{CAT_ICONS[p.category]||"📍"}</div>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontWeight:700, fontSize:14 }}>{p.name}</div>
+                {p.description && <div style={{ fontSize:12, color:"var(--muted)", marginTop:2, lineHeight:1.4 }}>{p.description}</div>}
+                {p.maps_url && <a href={p.maps_url} target="_blank" rel="noopener" style={{ display:"inline-flex", alignItems:"center", gap:4, marginTop:6, fontSize:12, fontWeight:700, color:"var(--blue)", textDecoration:"none", background:"#EBF5FF", padding:"5px 12px", borderRadius:8 }}>Abrir en Maps</a>}
+              </div>
+              <button onClick={() => del(p.id)} style={{ background:"none", border:"none", color:"#ccc", fontSize:18, flexShrink:0, padding:0 }}>x</button>
+            </div>
           ))}
         </div>
       )}
 
-      <div style={{ flex:1, overflowY:"auto", padding:"12px 16px 16px" }}>
-        {filtered.length===0 ? (
-          <div style={{ textAlign:"center", padding:"60px 0", color:"var(--muted)" }}>
-            <div style={{ fontSize:42, marginBottom:10 }}>🗺️</div>
-            <div style={{ fontWeight:700, fontSize:15 }}>Sin lugares todavia</div>
-            <div style={{ fontSize:13, marginTop:4 }}>Guarda los spots que no queres perderte</div>
-          </div>
-        ) : filtered.map(p => (
-          <div key={p.id} className="fade-up" style={{ background:"white", borderRadius:16, padding:"14px", boxShadow:"var(--shadow)", marginBottom:10, display:"flex", gap:12, alignItems:"flex-start" }}>
-            <div style={{ width:44, height:44, borderRadius:12, background:"var(--yellow-pale)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, flexShrink:0 }}>{CAT_ICONS[p.category]||"📍"}</div>
-            <div style={{ flex:1, minWidth:0 }}>
-              <div style={{ fontWeight:700, fontSize:14 }}>{p.name}</div>
-              {p.description && <div style={{ fontSize:12, color:"var(--muted)", marginTop:2, lineHeight:1.4 }}>{p.description}</div>}
-              {p.maps_url && <a href={p.maps_url} target="_blank" rel="noopener" style={{ display:"inline-flex", alignItems:"center", gap:4, marginTop:6, fontSize:12, fontWeight:700, color:"var(--blue)", textDecoration:"none", background:"#EBF5FF", padding:"5px 12px", borderRadius:8 }}>Abrir en Maps</a>}
-            </div>
-            <button onClick={() => del(p.id)} style={{ background:"none", border:"none", color:"#ccc", fontSize:18, flexShrink:0, padding:0 }}>x</button>
-          </div>
-        ))}
-      </div>
-
-      <div style={{ padding:"0 16px 16px", flexShrink:0 }}><Btn onClick={() => setShowAdd(true)}>+ Agregar lugar</Btn></div>
       {showAdd && <AddPlaceModal tripId={trip.id} onClose={() => setShowAdd(false)} onAdded={p => { setPlaces(prev=>[...prev,p]); setShowAdd(false); }}/>}
     </div>
   );
@@ -885,17 +1040,16 @@ const TABS = [
 
 function NavBtn({ tab, active, onClick }) {
   return (
-    <button onClick={onClick} style={{ flex:1, border:"none", background:"transparent", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"10px 2px 6px", position:"relative", WebkitTapHighlightColor:"transparent" }}>
-      <div style={{ fontSize:20 }}>{tab.icon}</div>
-      <div style={{ fontSize:10, fontWeight:active?800:600, color:active?"var(--dark)":"var(--muted)", marginTop:2 }}>{tab.label}</div>
-      {active && <div style={{ position:"absolute", bottom:0, left:"20%", right:"20%", height:2.5, background:"var(--yellow-dark)", borderRadius:2 }}/>}
+    <button onClick={onClick} style={{ flex:1, border:"none", background:"transparent", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"10px 4px 8px", position:"relative", WebkitTapHighlightColor:"transparent", minWidth:0 }}>
+      <div style={{ fontSize:22 }}>{tab.icon}</div>
+      <div style={{ fontSize:10, fontWeight:active?800:600, color:active?"var(--dark)":"var(--muted)", marginTop:3, lineHeight:1 }}>{tab.label}</div>
+      {active && <div style={{ position:"absolute", top:0, left:"15%", right:"15%", height:2.5, background:"var(--yellow-dark)", borderRadius:"0 0 2px 2px" }}/>}
     </button>
   );
 }
 
 function TripScreen({ trip, session, onBack, onLogout }) {
   const [tab, setTab] = useState("today");
-  const [showAddPlace, setShowAddPlace] = useState(false);
   const [placesKey, setPlacesKey] = useState(0);
   const status = tripStatus(trip.start_date, trip.end_date);
   const ss = STATUS_STYLES[status];
@@ -916,7 +1070,7 @@ function TripScreen({ trip, session, onBack, onLogout }) {
 
       {/* Content */}
       <div style={{ flex:1, overflow:"hidden", display:"flex", flexDirection:"column" }}>
-        {tab==="today"     && <TodayTab trip={trip}/>}
+        {tab==="today"     && <TodayTab trip={trip} onSwitchToItinerary={() => setTab("itinerary")}/>}
         {tab==="itinerary" && <ItineraryTab trip={trip}/>}
         {tab==="places"    && <PlacesTab trip={trip} key={placesKey}/>}
         {tab==="docs"      && <DocsTab trip={trip}/>}
@@ -924,22 +1078,9 @@ function TripScreen({ trip, session, onBack, onLogout }) {
       </div>
 
       {/* Bottom nav */}
-      <div style={{ background:"white", borderTop:"1px solid var(--border)", flexShrink:0, display:"flex", paddingBottom:"var(--sab)" }}>
-        {TABS.slice(0,2).map(t => <NavBtn key={t.id} tab={t} active={tab===t.id} onClick={() => setTab(t.id)}/>)}
-        {/* FAB */}
-        <button onClick={() => setShowAddPlace(true)} style={{ flex:1, border:"none", background:"transparent", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"8px 0 6px" }}>
-          <div style={{ width:44, height:44, borderRadius:"50%", background:"var(--yellow)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:24, fontWeight:700, boxShadow:"0 4px 14px rgba(255,214,0,0.5)", marginTop:-16 }}>+</div>
-        </button>
-        {TABS.slice(2).map(t => <NavBtn key={t.id} tab={t} active={tab===t.id} onClick={() => setTab(t.id)}/>)}
+      <div style={{ background:"white", borderTop:"1px solid var(--border)", flexShrink:0, display:"flex", paddingBottom:"max(var(--sab), 8px)" }}>
+        {TABS.map(t => <NavBtn key={t.id} tab={t} active={tab===t.id} onClick={() => setTab(t.id)}/>)}
       </div>
-
-      {showAddPlace && (
-        <AddPlaceModal tripId={trip.id} onClose={() => setShowAddPlace(false)} onAdded={() => {
-          setShowAddPlace(false);
-          setPlacesKey(k=>k+1);
-          setTab("places");
-        }}/>
-      )}
     </div>
   );
 }
