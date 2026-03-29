@@ -4,8 +4,53 @@ import { useState, useEffect, useRef } from "react";
 const SUPABASE_URL = "https://kzkiktkcyaazubqagfaw.supabase.co";
 const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt6a2lrdGtjeWFhenVicWFnZmF3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ3MjEyOTgsImV4cCI6MjA5MDI5NzI5OH0.vxn0EbPqtg8-L_xCHDz4Vm4aFBuKdbUkNWnof0gOMoM";
 
+// ─── JWT auto-refresh ─────────────────────────────────────────────────────────
+async function refreshSession(session) {
+  if (!session?.refresh_token) return null;
+  try {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_ANON, "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: session.refresh_token }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data.access_token) {
+      localStorage.setItem("jd_session", JSON.stringify(data));
+      return data;
+    }
+  } catch(e) {}
+  return null;
+}
+
+function isTokenExpired(session) {
+  if (!session?.expires_at) return false;
+  // expires_at is in seconds, refresh 60s before expiry
+  return Date.now() / 1000 > session.expires_at - 60;
+}
+
+// Global session ref so sb() always uses the latest token
+let _session = null;
+let _onSessionExpired = null;
+
+async function getValidSession() {
+  if (!_session) return null;
+  if (isTokenExpired(_session)) {
+    const fresh = await refreshSession(_session);
+    if (!fresh) {
+      // Token can't be refreshed — force logout
+      localStorage.removeItem("jd_session");
+      _session = null;
+      _onSessionExpired?.();
+      return null;
+    }
+    _session = fresh;
+  }
+  return _session;
+}
+
 async function sb(path, opts = {}) {
-  const session = JSON.parse(localStorage.getItem("jd_session") || "null");
+  const session = await getValidSession();
   const token = session?.access_token || SUPABASE_ANON;
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
     headers: {
@@ -17,6 +62,18 @@ async function sb(path, opts = {}) {
     },
     ...opts,
   });
+  if (res.status === 401) {
+    // Token rejected — try one refresh then give up
+    const fresh = await refreshSession(_session);
+    if (fresh) {
+      _session = fresh;
+      return sb(path, opts);
+    }
+    localStorage.removeItem("jd_session");
+    _session = null;
+    _onSessionExpired?.();
+    throw new Error("Sesión expirada. Por favor volvé a ingresar.");
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.message || res.statusText);
@@ -82,6 +139,11 @@ function timeToHour(t) {
   return hour + parseInt(m) / 60;
 }
 
+function getInitials(name) {
+  if (!name) return "?";
+  return name.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2);
+}
+
 const ACT_ICONS = {
   vuelo:"✈️", hotel:"🏨", restaurante:"🍽️", museo:"🏛️",
   naturaleza:"🌿", transporte:"🚗", compras:"🛍️", playa:"🌊",
@@ -113,6 +175,77 @@ function Logo({ size = 36 }) {
   );
 }
 
+// ─── Avatar ───────────────────────────────────────────────────────────────────
+function Avatar({ name, size = 36, onClick }) {
+  const initials = getInitials(name);
+  return (
+    <button onClick={onClick} style={{
+      width: size, height: size, borderRadius: "50%",
+      background: "#FFD600", border: "none",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      fontWeight: 800, fontSize: size * 0.38, color: "#111",
+      cursor: onClick ? "pointer" : "default",
+      flexShrink: 0, fontFamily: "inherit",
+      boxShadow: "0 2px 8px rgba(255,214,0,0.4)",
+      transition: "transform 0.15s",
+    }}
+      onMouseDown={e => e.currentTarget.style.transform = "scale(0.92)"}
+      onMouseUp={e => e.currentTarget.style.transform = "scale(1)"}
+      onTouchStart={e => e.currentTarget.style.transform = "scale(0.92)"}
+      onTouchEnd={e => e.currentTarget.style.transform = "scale(1)"}
+    >
+      {initials}
+    </button>
+  );
+}
+
+// ─── User Menu ────────────────────────────────────────────────────────────────
+function UserMenu({ session, onLogout, onClose }) {
+  const name = session?.user?.user_metadata?.full_name || session?.user?.email || "Usuario";
+  const email = session?.user?.email || "";
+
+  useEffect(() => {
+    const handler = (e) => { if (!e.target.closest("[data-usermenu]")) onClose(); };
+    setTimeout(() => document.addEventListener("click", handler), 10);
+    return () => document.removeEventListener("click", handler);
+  }, []);
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div style={{ position:"fixed", inset:0, zIndex:498 }} onClick={onClose}/>
+      {/* Sheet — bottom on mobile, dropdown on desktop */}
+      <div data-usermenu style={{
+        position: "fixed", bottom: 0, left: 0, right: 0,
+        background: "white",
+        borderRadius: "20px 20px 0 0",
+        padding: "20px 20px max(env(safe-area-inset-bottom,0px),20px)",
+        boxShadow: "0 -4px 32px rgba(0,0,0,0.15)", zIndex: 499,
+        animation: "fadeUp 0.2s ease",
+      }}>
+        {/* Handle */}
+        <div style={{ width:36, height:4, borderRadius:2, background:"#E0E0E0", margin:"0 auto 16px" }}/>
+        <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:20, padding:"0 4px" }}>
+          <div style={{ width:44, height:44, borderRadius:"50%", background:"var(--yellow)", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:800, fontSize:18, flexShrink:0 }}>
+            {getInitials(name)}
+          </div>
+          <div>
+            <div style={{ fontWeight:800, fontSize:16, color:"#111" }}>{name}</div>
+            <div style={{ fontSize:13, color:"#999", marginTop:1 }}>{email}</div>
+          </div>
+        </div>
+        <button onClick={onLogout} style={{
+          width: "100%", padding: "14px", border: "none", background: "#FEE2E2",
+          textAlign: "center", fontSize: 15, fontWeight: 800, color: "#E53935",
+          borderRadius: 14, cursor: "pointer", display: "flex", alignItems: "center", justifyContent:"center", gap: 8,
+        }}>
+          🚪 Cerrar sesión
+        </button>
+      </div>
+    </>
+  );
+}
+
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const STYLES = `
   @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&family=Space+Grotesk:wght@400;500;600;700&display=swap');
@@ -135,12 +268,16 @@ const STYLES = `
     --sat: env(safe-area-inset-top, 0px);
     --sab: env(safe-area-inset-bottom, 0px);
   }
-  html, body { height: 100%; background: var(--bg); font-family: 'Space Grotesk', sans-serif; -webkit-font-smoothing: antialiased; overscroll-behavior: none; }
-  #root { height: 100%; }
-  input, textarea, select, button { font-family: 'Space Grotesk', sans-serif; outline: none; }
-  button { cursor: pointer; }
+  html, body { height: 100%; background: var(--bg); font-family: 'Space Grotesk', sans-serif; -webkit-font-smoothing: antialiased; overscroll-behavior: none; -webkit-text-size-adjust: 100%; }
+  #root { height: 100%; display: flex; flex-direction: column; }
+  /* Prevent iOS zoom on input focus */
+  input, textarea, select { font-family: 'Space Grotesk', sans-serif; outline: none; font-size: 16px !important; }
+  button { cursor: pointer; font-family: 'Space Grotesk', sans-serif; -webkit-tap-highlight-color: transparent; }
   ::-webkit-scrollbar { width: 0; height: 0; }
+  /* iOS momentum scroll */
+  .scroll-y { overflow-y: auto; -webkit-overflow-scrolling: touch; }
   @keyframes fadeUp { from { opacity:0; transform:translateY(18px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
   @keyframes spin { to { transform:rotate(360deg); } }
   .fade-up  { animation: fadeUp 0.28s ease both; }
   .fade-up2 { animation: fadeUp 0.28s 0.06s ease both; }
@@ -160,7 +297,7 @@ function Toast({ msg, type = "ok", onClose }) {
   return (
     <div style={{
       position:"fixed", bottom:"calc(var(--nav-h) + var(--sab) + 12px)", left:"50%",
-      transform:"translateX(-50%)", background:"#111", color:"white",
+      transform:"translateX(-50%)", background: type === "err" ? "#E53935" : "#111", color:"white",
       padding:"11px 18px", borderRadius:14, fontSize:14, fontWeight:600,
       zIndex:9999, display:"flex", alignItems:"center", gap:8,
       boxShadow:"0 4px 20px rgba(0,0,0,0.28)", maxWidth:"88vw", animation:"fadeUp 0.2s ease",
@@ -178,7 +315,7 @@ function Modal({ title, onClose, children }) {
       <div style={{ background:"white", borderRadius:"22px 22px 0 0", width:"100%", maxWidth:500, maxHeight:"92vh", display:"flex", flexDirection:"column", paddingBottom:"var(--sab)", animation:"fadeUp 0.22s ease" }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"20px 20px 14px", flexShrink:0 }}>
           <div style={{ fontSize:17, fontWeight:800 }}>{title}</div>
-          <button onClick={onClose} style={{ background:"var(--border)", border:"none", borderRadius:10, width:32, height:32, fontSize:20, display:"flex", alignItems:"center", justifyContent:"center" }}>x</button>
+          <button onClick={onClose} style={{ background:"var(--border)", border:"none", borderRadius:10, width:32, height:32, fontSize:20, display:"flex", alignItems:"center", justifyContent:"center" }}>×</button>
         </div>
         <div style={{ overflowY:"auto", flex:1, padding:"0 20px 28px" }}>{children}</div>
       </div>
@@ -221,13 +358,24 @@ function Sel({ label, children, ...props }) {
   );
 }
 
-function Btn({ children, loading, disabled, ...props }) {
+function Btn({ children, loading, disabled, variant = "primary", ...props }) {
+  const styles = {
+    primary: { background: disabled ? "#eee" : "var(--yellow)", color: disabled ? "#aaa" : "var(--dark)" },
+    danger:  { background: "#FEE2E2", color: "var(--red)" },
+    ghost:   { background: "#F0F0F0", color: "var(--dark)" },
+  };
   return (
     <button style={{
-      width:"100%", background: disabled ? "#eee" : "var(--yellow)", color: disabled ? "#aaa" : "var(--dark)",
-      border:"none", borderRadius:14, padding:"14px 20px", fontSize:15, fontWeight:800,
+      width:"100%", border:"none", borderRadius:14, padding:"14px 20px", fontSize:15, fontWeight:800,
       display:"flex", alignItems:"center", justifyContent:"center", gap:8,
-    }} disabled={disabled} {...props}>
+      transition: "transform 0.12s, opacity 0.12s",
+      ...styles[variant],
+    }} disabled={disabled} {...props}
+      onMouseDown={e => !disabled && (e.currentTarget.style.transform = "scale(0.97)")}
+      onMouseUp={e => e.currentTarget.style.transform = "scale(1)"}
+      onTouchStart={e => !disabled && (e.currentTarget.style.transform = "scale(0.97)")}
+      onTouchEnd={e => e.currentTarget.style.transform = "scale(1)"}
+    >
       {loading
         ? <div style={{ width:18, height:18, border:"2.5px solid rgba(0,0,0,0.15)", borderTop:"2.5px solid var(--dark)", borderRadius:"50%", animation:"spin 0.7s linear infinite" }}/>
         : children}
@@ -268,7 +416,7 @@ function AuthScreen({ onAuth }) {
         <div style={{ fontFamily:"Nunito", fontWeight:900, fontSize:36, letterSpacing:"-1.5px", color:"#111", marginTop:10 }}>
           JD<span style={{ color:"#E6BE00" }}>_</span>viajes
         </div>
-        <div style={{ color:"#999", fontSize:14, marginTop:4 }}>Tu companero de aventuras</div>
+        <div style={{ color:"#999", fontSize:14, marginTop:4 }}>Tu compañero de aventuras</div>
       </div>
       <div className="fade-up2" style={{ background:"white", borderRadius:22, padding:"24px 20px", width:"100%", maxWidth:360, boxShadow:"0 8px 32px rgba(0,0,0,0.13)" }}>
         <div style={{ display:"flex", background:"#F7F7F7", borderRadius:12, padding:3, marginBottom:20 }}>
@@ -278,7 +426,7 @@ function AuthScreen({ onAuth }) {
         </div>
         {mode === "register" && <Input label="Nombre" value={name} onChange={e => setName(e.target.value)} placeholder="Tu nombre"/>}
         <Input label="Email" type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="tu@email.com"/>
-        <Input label="Contrasena" type="password" value={pass} onChange={e => setPass(e.target.value)} placeholder="••••••••"/>
+        <Input label="Contraseña" type="password" value={pass} onChange={e => setPass(e.target.value)} placeholder="••••••••"/>
         {err && <div style={{ color:"#E53935", fontSize:13, marginBottom:12, padding:"10px 14px", background:"#FEE2E2", borderRadius:10 }}>{err}</div>}
         {msg && <div style={{ color:"#00A36C", fontSize:13, marginBottom:12, padding:"10px 14px", background:"#D1FAE5", borderRadius:10 }}>{msg}</div>}
         <Btn onClick={handle} loading={loading} disabled={loading}>{mode==="login"?"Entrar":"Crear cuenta"}</Btn>
@@ -303,7 +451,7 @@ function EditCoverModal({ trip, onClose, onSaved }) {
     <Modal title="Foto del viaje" onClose={onClose}>
       <Input label="URL de imagen" value={url} onChange={e => setUrl(e.target.value)} placeholder="https://images.unsplash.com/..."/>
       {url && <div style={{ borderRadius:12, overflow:"hidden", marginBottom:14, height:120, background:`url(${url}) center/cover` }}/>}
-      <div style={{ fontSize:12, color:"var(--muted)", marginBottom:16 }}>Tip: usa <a href="https://unsplash.com" target="_blank" style={{ color:"var(--blue)" }}>unsplash.com</a> — abre la foto y copia la URL.</div>
+      <div style={{ fontSize:12, color:"var(--muted)", marginBottom:16 }}>Tip: usá <a href="https://unsplash.com" target="_blank" style={{ color:"var(--blue)" }}>unsplash.com</a> — abrí la foto y copiá la URL.</div>
       <Btn onClick={save} loading={loading}>Guardar</Btn>
     </Modal>
   );
@@ -315,19 +463,25 @@ function AddTripModal({ userId, onClose, onCreated }) {
   const [end, setEnd] = useState("");
   const [cover, setCover] = useState("");
   const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
 
   async function create() {
-    if (!title || !start || !end) return;
+    if (!title || !start || !end) { setErr("Completá todos los campos"); return; }
     setLoading(true);
+    setErr("");
     try {
       const [trip] = await sb("trips", { method:"POST", body:JSON.stringify({ title, start_date:start, end_date:end, owner_id:userId, status:"active", cover_url:cover||null }) });
+
+      // Insert trip_member for owner
+      await sb("trip_members", { method:"POST", body:JSON.stringify({ trip_id:trip.id, user_id:userId, role:"owner" }) });
+
       const days = [];
       for (let d = new Date(start+"T12:00:00"); d <= new Date(end+"T12:00:00"); d.setDate(d.getDate()+1)) {
         days.push({ trip_id:trip.id, date:d.toISOString().slice(0,10), title:"" });
       }
       if (days.length) await sb("days", { method:"POST", body:JSON.stringify(days) });
       onCreated(trip);
-    } catch(e) { alert(e.message); }
+    } catch(e) { setErr(e.message); }
     setLoading(false);
   }
 
@@ -338,6 +492,7 @@ function AddTripModal({ userId, onClose, onCreated }) {
       <Input label="Hasta" type="date" value={end} onChange={e => setEnd(e.target.value)}/>
       <Input label="Foto (URL, opcional)" value={cover} onChange={e => setCover(e.target.value)} placeholder="https://..."/>
       {cover && <div style={{ borderRadius:12, overflow:"hidden", marginBottom:14, height:100, background:`url(${cover}) center/cover` }}/>}
+      {err && <div style={{ color:"#E53935", fontSize:13, marginBottom:12, padding:"10px 14px", background:"#FEE2E2", borderRadius:10 }}>{err}</div>}
       <Btn onClick={create} loading={loading} disabled={loading||!title||!start||!end}>Crear viaje</Btn>
     </Modal>
   );
@@ -349,29 +504,37 @@ function TripCard({ trip, onClick, onEditCover }) {
   const ci = trip.title.length % COVER_COLORS.length;
   const bg = trip.cover_url ? `url(${trip.cover_url}) center/cover` : `linear-gradient(135deg,${COVER_COLORS[ci]},${COVER_COLORS[(ci+3)%COVER_COLORS.length]})`;
   return (
-    <div className="fade-up" style={{ borderRadius:20, overflow:"hidden", boxShadow:"var(--shadow)", marginBottom:14, background:"white" }}>
-      <div onClick={onClick} style={{ height:150, background:bg, position:"relative", cursor:"pointer" }}>
+    <div className="fade-up" style={{ borderRadius:20, overflow:"hidden", boxShadow:"var(--shadow)", marginBottom:14, background:"white",
+      transition:"transform 0.15s", cursor:"pointer" }}
+      onMouseDown={e => e.currentTarget.style.transform = "scale(0.98)"}
+      onMouseUp={e => e.currentTarget.style.transform = "scale(1)"}
+      onTouchStart={e => e.currentTarget.style.transform = "scale(0.98)"}
+      onTouchEnd={e => e.currentTarget.style.transform = "scale(1)"}
+    >
+      <div onClick={onClick} style={{ height:150, background:bg, position:"relative" }}>
         <div style={{ position:"absolute", inset:0, background:"linear-gradient(to top,rgba(0,0,0,0.55) 0%,transparent 55%)" }}/>
-        <button onClick={e => { e.stopPropagation(); onEditCover(trip); }} style={{ position:"absolute", top:12, right:12, background:"rgba(0,0,0,0.35)", border:"none", borderRadius:8, padding:"5px 10px", color:"white", fontSize:12, fontWeight:600, backdropFilter:"blur(6px)" }}>Foto</button>
+        <button onClick={e => { e.stopPropagation(); onEditCover(trip); }} style={{ position:"absolute", top:12, right:12, background:"rgba(0,0,0,0.35)", border:"none", borderRadius:8, padding:"5px 10px", color:"white", fontSize:12, fontWeight:600, backdropFilter:"blur(6px)" }}>📷 Foto</button>
         <div style={{ position:"absolute", bottom:14, left:16, right:16 }}>
           <div style={{ fontFamily:"Nunito", fontWeight:900, fontSize:22, color:"white", textShadow:"0 2px 8px rgba(0,0,0,0.4)", lineHeight:1.1 }}>{trip.title}</div>
         </div>
       </div>
-      <div onClick={onClick} style={{ padding:"11px 16px", display:"flex", justifyContent:"space-between", alignItems:"center", cursor:"pointer" }}>
-        <div style={{ fontSize:13, color:"var(--muted)", fontWeight:500 }}>{fmtDate(trip.start_date)} -> {fmtDate(trip.end_date)}</div>
+      <div onClick={onClick} style={{ padding:"11px 16px", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+        <div style={{ fontSize:13, color:"var(--muted)", fontWeight:500 }}>{fmtDate(trip.start_date)} → {fmtDate(trip.end_date)}</div>
         <div style={{ fontSize:11, fontWeight:700, padding:"4px 11px", borderRadius:20, background:ss.bg, color:ss.color }}>{ss.label}</div>
       </div>
     </div>
   );
 }
 
-function TripsScreen({ session, onSelectTrip }) {
+function TripsScreen({ session, onSelectTrip, onLogout }) {
   const [trips, setTrips] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [editCoverTrip, setEditCoverTrip] = useState(null);
   const [toast, setToast] = useState(null);
+  const [showUserMenu, setShowUserMenu] = useState(false);
   const autoOpened = useRef(false);
+  const name = session?.user?.user_metadata?.full_name || session?.user?.email || "Usuario";
 
   useEffect(() => { load(); }, []);
 
@@ -392,13 +555,14 @@ function TripsScreen({ session, onSelectTrip }) {
         return a.start_date.localeCompare(b.start_date);
       });
       setTrips(all);
-      // Auto-open active trip once
       if (!autoOpened.current) {
         autoOpened.current = true;
         const active = all.find(t => tripStatus(t.start_date, t.end_date) === "actual");
         if (active) { onSelectTrip(active); return; }
       }
-    } catch(e) { console.error(e); }
+    } catch(e) {
+      setToast({ msg: e.message || "Error cargando viajes", type: "err" });
+    }
     setLoading(false);
   }
 
@@ -407,13 +571,17 @@ function TripsScreen({ session, onSelectTrip }) {
 
   return (
     <div style={{ minHeight:"100vh", background:"var(--bg)", paddingBottom:24 }}>
-      <div style={{ background:"white", padding:"calc(var(--sat) + 14px) 20px 14px", borderBottom:"1px solid var(--border)", position:"sticky", top:0, zIndex:10 }}>
+      <div style={{ background:"white", padding:"calc(var(--sat) + 14px) 20px 14px", borderBottom:"1px solid var(--border)", position:"sticky", top:0, zIndex:10, WebkitBackdropFilter:"blur(8px)" }}>
         <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
           <div style={{ display:"flex", alignItems:"center", gap:10 }}>
             <Logo size={30}/>
             <span style={{ fontFamily:"Nunito", fontWeight:900, fontSize:22, letterSpacing:"-0.5px" }}>JD<span style={{ color:"#E6BE00" }}>_</span>viajes</span>
           </div>
-          <button onClick={() => setShowAdd(true)} style={{ background:"var(--yellow)", border:"none", borderRadius:12, width:38, height:38, fontSize:24, display:"flex", alignItems:"center", justifyContent:"center", boxShadow:"0 2px 10px rgba(255,214,0,0.45)" }}>+</button>
+          <div style={{ display:"flex", alignItems:"center", gap:10, position:"relative" }}>
+            <button onClick={() => setShowAdd(true)} style={{ background:"var(--yellow)", border:"none", borderRadius:12, width:38, height:38, fontSize:24, display:"flex", alignItems:"center", justifyContent:"center", boxShadow:"0 2px 10px rgba(255,214,0,0.45)" }}>+</button>
+            <Avatar name={name} size={38} onClick={() => setShowUserMenu(v => !v)} />
+            {showUserMenu && <UserMenu session={session} onLogout={onLogout} onClose={() => setShowUserMenu(false)} />}
+          </div>
         </div>
       </div>
 
@@ -421,8 +589,8 @@ function TripsScreen({ session, onSelectTrip }) {
         {loading ? <Spinner/> : trips.length === 0 ? (
           <div style={{ textAlign:"center", padding:"72px 0" }}>
             <div style={{ fontSize:52, marginBottom:12 }}>🌊</div>
-            <div style={{ fontWeight:800, fontSize:17 }}>Todavia no hay viajes</div>
-            <div style={{ fontSize:14, color:"var(--muted)", marginTop:6 }}>Toca + para crear tu primera aventura</div>
+            <div style={{ fontWeight:800, fontSize:17 }}>Todavía no hay viajes</div>
+            <div style={{ fontSize:14, color:"var(--muted)", marginTop:6 }}>Tocá + para crear tu primera aventura</div>
           </div>
         ) : (
           <>
@@ -441,9 +609,9 @@ function TripsScreen({ session, onSelectTrip }) {
       {editCoverTrip && <EditCoverModal trip={editCoverTrip} onClose={() => setEditCoverTrip(null)} onSaved={url => {
         setTrips(prev => prev.map(t => t.id === editCoverTrip.id ? { ...t, cover_url: url } : t));
         setEditCoverTrip(null);
-        setToast({ msg:"Foto actualizada" });
+        setToast({ msg:"Foto actualizada ✓" });
       }}/>}
-      {toast && <Toast msg={toast.msg} onClose={() => setToast(null)}/>}
+      {toast && <Toast msg={toast.msg} type={toast.type} onClose={() => setToast(null)}/>}
     </div>
   );
 }
@@ -482,8 +650,6 @@ function AddActModal({ dayId, onClose, onAdded }) {
 }
 
 // ─── TODAY TAB ────────────────────────────────────────────────────────────────
-// If today matches a trip day -> delegate to ItineraryTab focused on today
-// If not -> show a "next upcoming day" preview
 function TodayTab({ trip, onSwitchToItinerary }) {
   const [todayDay, setTodayDay] = useState(null);
   const [acts, setActs] = useState([]);
@@ -501,12 +667,10 @@ function TodayTab({ trip, onSwitchToItinerary }) {
       const t = todayStr();
       const exactToday = ds.find(d => d.date === t);
       if (exactToday) {
-        // Today IS a trip day — switch to itinerary tab directly
         setIsTripDay(true);
         onSwitchToItinerary();
         return;
       }
-      // Not a trip day — show next upcoming or last
       let target = ds.find(d => d.date > t) || ds[ds.length - 1];
       if (target) {
         setTodayDay(target);
@@ -530,9 +694,9 @@ function TodayTab({ trip, onSwitchToItinerary }) {
   const isUpcoming = todayDay && todayDay.date > todayStr();
 
   return (
-    <div style={{ display:"flex", flexDirection:"column", height:"100%", overflowY:"auto" }}>
+    <div className="scroll-y" style={{ display:"flex", flexDirection:"column", height:"100%", overflowY:"auto" }}>
       <div style={{ padding:"14px 16px 12px", background:"white", borderBottom:"1px solid var(--border)" }}>
-        <div style={{ fontSize:12, color:"var(--muted)", fontWeight:600 }}>{isUpcoming ? "Proximo dia" : "Ultimo dia del viaje"}</div>
+        <div style={{ fontSize:12, color:"var(--muted)", fontWeight:600 }}>{isUpcoming ? "Próximo día" : "Último día del viaje"}</div>
         <div style={{ fontFamily:"Nunito", fontWeight:900, fontSize:24, letterSpacing:"-0.5px", marginTop:2 }}>{fmtDayFull(todayDay?.date)}</div>
         {todayDay?.title && <div style={{ fontSize:13, color:"var(--muted)", marginTop:2 }}>{todayDay.title}</div>}
       </div>
@@ -561,11 +725,11 @@ function TodayTab({ trip, onSwitchToItinerary }) {
                 {a.description && <div style={{ fontSize:12, color:"var(--muted)", marginTop:3, lineHeight:1.45 }}>{a.description}</div>}
                 {a.maps_url && (
                   <a href={a.maps_url} target="_blank" rel="noopener" style={{ display:"inline-flex", alignItems:"center", gap:4, marginTop:6, fontSize:12, fontWeight:700, color:"var(--blue)", textDecoration:"none", background:"#EBF5FF", padding:"4px 10px", borderRadius:8 }}>
-                    Abrir Maps
+                    📍 Abrir Maps
                   </a>
                 )}
               </div>
-              <button onClick={() => delAct(a.id)} style={{ background:"none", border:"none", padding:"0 12px", color:"#ccc", fontSize:18 }}>x</button>
+              <button onClick={() => delAct(a.id)} style={{ background:"none", border:"none", padding:"0 12px", color:"#ccc", fontSize:18 }}>×</button>
             </div>
           );
         })}
@@ -578,7 +742,7 @@ function TodayTab({ trip, onSwitchToItinerary }) {
       {showAdd && todayDay && <AddActModal dayId={todayDay.id} onClose={() => setShowAdd(false)} onAdded={a => {
         setActs(prev => [...prev, a].sort((x,y) => (x.time||"").localeCompare(y.time||"")));
         setShowAdd(false);
-        setToast({ msg:"Actividad agregada" });
+        setToast({ msg:"Actividad agregada ✓" });
       }}/>}
       {toast && <Toast msg={toast.msg} onClose={() => setToast(null)}/>}
     </div>
@@ -592,6 +756,7 @@ function ItineraryTab({ trip }) {
   const [sel, setSel] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [toast, setToast] = useState(null);
   const barRef = useRef(null);
 
   useEffect(() => { load(); }, [trip.id]);
@@ -614,6 +779,7 @@ function ItineraryTab({ trip }) {
   async function delAct(id) {
     await sb(`activities?id=eq.${id}`, { method:"DELETE", prefer:"" });
     if (sel) setActs(prev => ({ ...prev, [sel.id]: (prev[sel.id]||[]).filter(a => a.id!==id) }));
+    setToast({ msg:"Actividad eliminada" });
   }
 
   useEffect(() => {
@@ -644,9 +810,15 @@ function ItineraryTab({ trip }) {
           <div style={{ textAlign:"center", padding:"48px 0", color:"var(--muted)" }}>
             <div style={{ fontSize:36, marginBottom:8 }}>📭</div>
             <div style={{ fontWeight:700, fontSize:14 }}>Sin actividades</div>
+            <div style={{ fontSize:13, marginTop:4 }}>Tocá el botón para agregar</div>
           </div>
         ) : dayActs.map(a => (
-          <div key={a.id} style={{ background:"white", borderRadius:14, marginBottom:10, display:"flex", boxShadow:"var(--shadow)" }}>
+          <div key={a.id} style={{ background:"white", borderRadius:14, marginBottom:10, display:"flex", boxShadow:"var(--shadow)", transition:"transform 0.12s" }}
+            onMouseDown={e => e.currentTarget.style.transform="scale(0.98)"}
+            onMouseUp={e => e.currentTarget.style.transform="scale(1)"}
+            onTouchStart={e => e.currentTarget.style.transform="scale(0.98)"}
+            onTouchEnd={e => e.currentTarget.style.transform="scale(1)"}
+          >
             <div style={{ width:64, background:"#FAFAFA", borderRight:"1px solid var(--border)", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"12px 4px", flexShrink:0 }}>
               <div style={{ fontSize:18 }}>{ACT_ICONS[a.type]||"📍"}</div>
               <div style={{ fontSize:10, fontWeight:600, color:"var(--muted)", textAlign:"center", marginTop:4, lineHeight:1.2 }}>{a.time||"—"}</div>
@@ -654,9 +826,9 @@ function ItineraryTab({ trip }) {
             <div style={{ padding:"12px", flex:1, minWidth:0 }}>
               <div style={{ fontWeight:700, fontSize:14 }}>{a.title}</div>
               {a.description && <div style={{ fontSize:12, color:"var(--muted)", marginTop:2, lineHeight:1.4 }}>{a.description}</div>}
-              {a.maps_url && <a href={a.maps_url} target="_blank" rel="noopener" style={{ display:"inline-flex", alignItems:"center", gap:3, marginTop:5, fontSize:11, fontWeight:700, color:"var(--blue)", textDecoration:"none" }}>Maps</a>}
+              {a.maps_url && <a href={a.maps_url} target="_blank" rel="noopener" style={{ display:"inline-flex", alignItems:"center", gap:3, marginTop:5, fontSize:11, fontWeight:700, color:"var(--blue)", textDecoration:"none", background:"#EBF5FF", padding:"4px 10px", borderRadius:8 }}>📍 Maps</a>}
             </div>
-            <button onClick={() => delAct(a.id)} style={{ background:"none", border:"none", padding:"0 12px", color:"#ccc", fontSize:18 }}>x</button>
+            <button onClick={() => delAct(a.id)} style={{ background:"none", border:"none", padding:"0 12px", color:"#ccc", fontSize:18 }}>×</button>
           </div>
         ))}
       </div>
@@ -665,7 +837,9 @@ function ItineraryTab({ trip }) {
       {showAdd && sel && <AddActModal dayId={sel.id} onClose={() => setShowAdd(false)} onAdded={a => {
         setActs(prev => ({ ...prev, [sel.id]: [...(prev[sel.id]||[]), a].sort((x,y) => (x.time||"").localeCompare(y.time||"")) }));
         setShowAdd(false);
+        setToast({ msg:"Actividad agregada ✓" });
       }}/>}
+      {toast && <Toast msg={toast.msg} onClose={() => setToast(null)}/>}
     </div>
   );
 }
@@ -691,7 +865,7 @@ function AddPlaceModal({ tripId, onClose, onAdded }) {
   return (
     <Modal title="Nuevo lugar" onClose={onClose}>
       <Input label="Nombre" value={name} onChange={e => setName(e.target.value)} placeholder="Ej: Mercado Central"/>
-      <Sel label="Categoria" value={cat} onChange={e => setCat(e.target.value)}>
+      <Sel label="Categoría" value={cat} onChange={e => setCat(e.target.value)}>
         {Object.entries(CAT_ICONS).map(([k,v]) => <option key={k} value={k}>{v} {k[0].toUpperCase()+k.slice(1)}</option>)}
       </Sel>
       <Textarea label="Notas" value={desc} onChange={e => setDesc(e.target.value)} placeholder="Tips, horarios..."/>
@@ -701,33 +875,25 @@ function AddPlaceModal({ tripId, onClose, onAdded }) {
   );
 }
 
-// ── Leaflet map helper ────────────────────────────────────────────────────────
 function useLeaflet(mapRef, places) {
   const mapInstanceRef = useRef(null);
   const markersRef = useRef([]);
 
   useEffect(() => {
     if (!mapRef.current || places.length === 0) return;
-
-    // Load Leaflet CSS once
     if (!document.getElementById("leaflet-css")) {
       const link = document.createElement("link");
-      link.id = "leaflet-css";
-      link.rel = "stylesheet";
+      link.id = "leaflet-css"; link.rel = "stylesheet";
       link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
       document.head.appendChild(link);
     }
-
-    // Load Leaflet JS once then init map
     function initMap(L) {
       if (mapInstanceRef.current) {
-        // Already initialized — just update markers
         markersRef.current.forEach(m => m.remove());
         markersRef.current = [];
         addMarkers(L, mapInstanceRef.current);
         return;
       }
-      // Use first place as center or fallback to world center
       const first = places.find(p => p.lat && p.lng) || null;
       const center = first ? [first.lat, first.lng] : [20, 0];
       const map = L.map(mapRef.current, { zoomControl: true, attributionControl: false }).setView(center, first ? 14 : 2);
@@ -735,45 +901,33 @@ function useLeaflet(mapRef, places) {
       mapInstanceRef.current = map;
       addMarkers(L, map);
     }
-
     function addMarkers(L, map) {
-      const validPlaces = places.filter(p => p.lat && p.lng);
-      if (validPlaces.length === 0) return;
-
+      const valid = places.filter(p => p.lat && p.lng);
+      if (!valid.length) return;
       const bounds = [];
-      validPlaces.forEach(p => {
-        const icon = L.divIcon({
-          html: `<div style="background:#FFD600;border:2.5px solid #111;border-radius:50% 50% 50% 0;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:15px;transform:rotate(-45deg);box-shadow:0 2px 8px rgba(0,0,0,0.25)"><span style="transform:rotate(45deg)">${CAT_ICONS[p.category]||"📍"}</span></div>`,
-          className: "", iconSize: [32, 32], iconAnchor: [16, 32],
-        });
-        const marker = L.marker([p.lat, p.lng], { icon })
-          .addTo(map)
-          .bindPopup(`<div style="font-family:sans-serif;min-width:140px"><strong style="font-size:13px">${p.name}</strong>${p.description ? `<div style="font-size:11px;color:#888;margin-top:4px">${p.description}</div>` : ""}${p.maps_url ? `<a href="${p.maps_url}" target="_blank" style="display:block;margin-top:6px;font-size:11px;font-weight:700;color:#1A73E8">Abrir Maps →</a>` : ""}</div>`);
+      valid.forEach(p => {
+        const icon = L.divIcon({ html:`<div style="background:#FFD600;border:2.5px solid #111;border-radius:50% 50% 50% 0;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:15px;transform:rotate(-45deg);box-shadow:0 2px 8px rgba(0,0,0,0.25)"><span style="transform:rotate(45deg)">${CAT_ICONS[p.category]||"📍"}</span></div>`, className:"", iconSize:[32,32], iconAnchor:[16,32] });
+        const marker = L.marker([p.lat,p.lng],{icon}).addTo(map).bindPopup(`<div style="font-family:sans-serif;min-width:140px"><strong style="font-size:13px">${p.name}</strong>${p.description?`<div style="font-size:11px;color:#888;margin-top:4px">${p.description}</div>`:""}${p.maps_url?`<a href="${p.maps_url}" target="_blank" style="display:block;margin-top:6px;font-size:11px;font-weight:700;color:#1A73E8">Abrir Maps →</a>`:""}</div>`);
         markersRef.current.push(marker);
-        bounds.push([p.lat, p.lng]);
+        bounds.push([p.lat,p.lng]);
       });
-      if (bounds.length > 1) map.fitBounds(bounds, { padding: [40, 40] });
-      else if (bounds.length === 1) map.setView(bounds[0], 15);
+      if (bounds.length > 1) map.fitBounds(bounds, { padding:[40,40] });
+      else map.setView(bounds[0], 15);
     }
-
     if (window.L) { initMap(window.L); return; }
     const script = document.createElement("script");
     script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
     script.onload = () => initMap(window.L);
     document.head.appendChild(script);
-
-    return () => {
-      if (mapInstanceRef.current) { mapInstanceRef.current.remove(); mapInstanceRef.current = null; }
-    };
+    return () => { if (mapInstanceRef.current) { mapInstanceRef.current.remove(); mapInstanceRef.current = null; } };
   }, [places]);
 }
 
-// Geocode a place name using Nominatim (free, no key)
 async function geocode(name) {
   try {
-    const r = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(name)}&format=json&limit=1`, { headers: { "Accept-Language": "es" } });
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(name)}&format=json&limit=1`, { headers:{"Accept-Language":"es"} });
     const d = await r.json();
-    if (d.length) return { lat: parseFloat(d[0].lat), lng: parseFloat(d[0].lon) };
+    if (d.length) return { lat:parseFloat(d[0].lat), lng:parseFloat(d[0].lon) };
   } catch(e) {}
   return null;
 }
@@ -781,24 +935,22 @@ async function geocode(name) {
 function PlacesMap({ places }) {
   const mapRef = useRef(null);
   useLeaflet(mapRef, places);
-  return (
-    <div ref={mapRef} style={{ width:"100%", height:"100%", background:"#e8e8e8" }}/>
-  );
+  return <div ref={mapRef} style={{ width:"100%", height:"100%", background:"#e8e8e8" }}/>;
 }
 
 function PlacesTab({ trip }) {
   const [places, setPlaces] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
-  const [view, setView] = useState("map"); // "map" | "list"
+  const [view, setView] = useState("map");
   const [selected, setSelected] = useState(null);
+  const [toast, setToast] = useState(null);
 
   useEffect(() => { load(); }, [trip.id]);
 
   async function load() {
     setLoading(true);
     const ps = await sb(`places?trip_id=eq.${trip.id}&order=category.asc`);
-    // Geocode places that don't have coords yet
     const enriched = await Promise.all(ps.map(async p => {
       if (p.lat && p.lng) return p;
       const coords = await geocode(p.name + " " + trip.title);
@@ -812,13 +964,13 @@ function PlacesTab({ trip }) {
     await sb(`places?id=eq.${id}`, { method:"DELETE", prefer:"" });
     setPlaces(prev => prev.filter(p => p.id !== id));
     if (selected?.id === id) setSelected(null);
+    setToast({ msg:"Lugar eliminado" });
   }
 
   if (loading) return <Spinner/>;
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%" }}>
-      {/* Toggle map/list */}
       <div style={{ display:"flex", background:"white", borderBottom:"1px solid var(--border)", padding:"8px 12px", gap:6, flexShrink:0, alignItems:"center", justifyContent:"space-between" }}>
         <div style={{ display:"flex", background:"var(--bg)", borderRadius:10, padding:3 }}>
           {[["map","🗺️ Mapa"],["list","☰ Lista"]].map(([v,l]) => (
@@ -828,28 +980,20 @@ function PlacesTab({ trip }) {
         <button onClick={() => setShowAdd(true)} style={{ background:"var(--yellow)", border:"none", borderRadius:10, padding:"7px 14px", fontSize:13, fontWeight:800 }}>+ Lugar</button>
       </div>
 
-      {/* Map view */}
       {view === "map" && (
         <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
           {places.length === 0 ? (
             <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", height:"100%", color:"var(--muted)" }}>
               <div style={{ fontSize:48, marginBottom:12 }}>🗺️</div>
-              <div style={{ fontWeight:700, fontSize:15 }}>Sin lugares todavia</div>
-              <div style={{ fontSize:13, marginTop:4 }}>Agrega el primero con el boton +</div>
+              <div style={{ fontWeight:700, fontSize:15 }}>Sin lugares todavía</div>
             </div>
           ) : (
             <>
               <PlacesMap places={places}/>
-              {/* Bottom sheet: place chips */}
               <div style={{ position:"absolute", bottom:0, left:0, right:0, background:"white", borderRadius:"16px 16px 0 0", boxShadow:"0 -4px 20px rgba(0,0,0,0.12)", padding:"10px 0 8px" }}>
                 <div style={{ display:"flex", gap:8, overflowX:"auto", padding:"0 12px", scrollbarWidth:"none" }}>
                   {places.map(p => (
-                    <button key={p.id} onClick={() => setSelected(selected?.id===p.id ? null : p)} style={{
-                      flexShrink:0, border:"none", borderRadius:20, padding:"7px 14px",
-                      background: selected?.id===p.id ? "var(--dark)" : "var(--bg)",
-                      color: selected?.id===p.id ? "white" : "var(--dark)",
-                      fontSize:12, fontWeight:700, display:"flex", alignItems:"center", gap:6, transition:"all 0.15s",
-                    }}>
+                    <button key={p.id} onClick={() => setSelected(selected?.id===p.id ? null : p)} style={{ flexShrink:0, border:"none", borderRadius:20, padding:"7px 14px", background:selected?.id===p.id?"var(--dark)":"var(--bg)", color:selected?.id===p.id?"white":"var(--dark)", fontSize:12, fontWeight:700, display:"flex", alignItems:"center", gap:6, transition:"all 0.15s" }}>
                       {CAT_ICONS[p.category]||"📍"} {p.name}
                     </button>
                   ))}
@@ -872,13 +1016,12 @@ function PlacesTab({ trip }) {
         </div>
       )}
 
-      {/* List view */}
       {view === "list" && (
         <div style={{ flex:1, overflowY:"auto", padding:"12px 16px 16px" }}>
           {places.length === 0 ? (
             <div style={{ textAlign:"center", padding:"60px 0", color:"var(--muted)" }}>
               <div style={{ fontSize:42, marginBottom:10 }}>🗺️</div>
-              <div style={{ fontWeight:700, fontSize:15 }}>Sin lugares todavia</div>
+              <div style={{ fontWeight:700, fontSize:15 }}>Sin lugares todavía</div>
             </div>
           ) : places.map(p => (
             <div key={p.id} className="fade-up" style={{ background:"white", borderRadius:16, padding:"14px", boxShadow:"var(--shadow)", marginBottom:10, display:"flex", gap:12, alignItems:"flex-start" }}>
@@ -886,15 +1029,16 @@ function PlacesTab({ trip }) {
               <div style={{ flex:1, minWidth:0 }}>
                 <div style={{ fontWeight:700, fontSize:14 }}>{p.name}</div>
                 {p.description && <div style={{ fontSize:12, color:"var(--muted)", marginTop:2, lineHeight:1.4 }}>{p.description}</div>}
-                {p.maps_url && <a href={p.maps_url} target="_blank" rel="noopener" style={{ display:"inline-flex", alignItems:"center", gap:4, marginTop:6, fontSize:12, fontWeight:700, color:"var(--blue)", textDecoration:"none", background:"#EBF5FF", padding:"5px 12px", borderRadius:8 }}>Abrir en Maps</a>}
+                {p.maps_url && <a href={p.maps_url} target="_blank" rel="noopener" style={{ display:"inline-flex", alignItems:"center", gap:4, marginTop:6, fontSize:12, fontWeight:700, color:"var(--blue)", textDecoration:"none", background:"#EBF5FF", padding:"5px 12px", borderRadius:8 }}>📍 Abrir en Maps</a>}
               </div>
-              <button onClick={() => del(p.id)} style={{ background:"none", border:"none", color:"#ccc", fontSize:18, flexShrink:0, padding:0 }}>x</button>
+              <button onClick={() => del(p.id)} style={{ background:"none", border:"none", color:"#ccc", fontSize:18, flexShrink:0, padding:0 }}>×</button>
             </div>
           ))}
         </div>
       )}
 
-      {showAdd && <AddPlaceModal tripId={trip.id} onClose={() => setShowAdd(false)} onAdded={p => { setPlaces(prev=>[...prev,p]); setShowAdd(false); }}/>}
+      {showAdd && <AddPlaceModal tripId={trip.id} onClose={() => setShowAdd(false)} onAdded={p => { setPlaces(prev=>[...prev,p]); setShowAdd(false); setToast({ msg:"Lugar agregado ✓" }); }}/>}
+      {toast && <Toast msg={toast.msg} onClose={() => setToast(null)}/>}
     </div>
   );
 }
@@ -932,10 +1076,15 @@ function DocsTab({ trip }) {
   const [docs, setDocs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
+  const [toast, setToast] = useState(null);
 
   useEffect(() => { load(); }, [trip.id]);
   async function load() { setLoading(true); const ds = await sb(`documents?trip_id=eq.${trip.id}&order=type.asc`); setDocs(ds); setLoading(false); }
-  async function del(id) { await sb(`documents?id=eq.${id}`, { method:"DELETE", prefer:"" }); setDocs(prev=>prev.filter(d=>d.id!==id)); }
+  async function del(id) {
+    await sb(`documents?id=eq.${id}`, { method:"DELETE", prefer:"" });
+    setDocs(prev=>prev.filter(d=>d.id!==id));
+    setToast({ msg:"Documento eliminado" });
+  }
 
   if (loading) return <Spinner/>;
 
@@ -946,7 +1095,7 @@ function DocsTab({ trip }) {
           <div style={{ textAlign:"center", padding:"60px 0", color:"var(--muted)" }}>
             <div style={{ fontSize:42, marginBottom:10 }}>📁</div>
             <div style={{ fontWeight:700, fontSize:15 }}>Sin documentos</div>
-            <div style={{ fontSize:13, marginTop:4 }}>Pasajes, seguros, entradas — todo aca</div>
+            <div style={{ fontSize:13, marginTop:4 }}>Pasajes, seguros, entradas — todo acá</div>
           </div>
         ) : docs.map(d => (
           <div key={d.id} className="fade-up" style={{ background:"white", borderRadius:16, padding:"16px", boxShadow:"var(--shadow)", marginBottom:10, display:"flex", alignItems:"center", gap:14 }}>
@@ -959,13 +1108,14 @@ function DocsTab({ trip }) {
             </div>
             <div style={{ display:"flex", gap:8, flexShrink:0, alignItems:"center" }}>
               {d.file_url && <a href={d.file_url} target="_blank" rel="noopener" style={{ fontSize:13, fontWeight:800, color:"var(--blue)", textDecoration:"none", padding:"8px 14px", background:"#EBF5FF", borderRadius:10 }}>Ver</a>}
-              <button onClick={() => del(d.id)} style={{ background:"none", border:"none", color:"#ccc", fontSize:20, padding:0 }}>x</button>
+              <button onClick={() => del(d.id)} style={{ background:"none", border:"none", color:"#ccc", fontSize:20, padding:0 }}>×</button>
             </div>
           </div>
         ))}
       </div>
       <div style={{ padding:"0 16px 16px", flexShrink:0 }}><Btn onClick={() => setShowAdd(true)}>+ Agregar documento</Btn></div>
-      {showAdd && <AddDocModal tripId={trip.id} onClose={() => setShowAdd(false)} onAdded={d => { setDocs(prev=>[...prev,d]); setShowAdd(false); }}/>}
+      {showAdd && <AddDocModal tripId={trip.id} onClose={() => setShowAdd(false)} onAdded={d => { setDocs(prev=>[...prev,d]); setShowAdd(false); setToast({ msg:"Documento agregado ✓" }); }}/>}
+      {toast && <Toast msg={toast.msg} onClose={() => setToast(null)}/>}
     </div>
   );
 }
@@ -986,9 +1136,9 @@ function MembersTab({ trip, session, onLogout }) {
     setInviting(true);
     try {
       const ps = await sb(`profiles?email=eq.${encodeURIComponent(email)}`);
-      if (!ps?.length) { setToast({ msg:"No se encontro ese usuario", type:"err" }); setInviting(false); return; }
+      if (!ps?.length) { setToast({ msg:"No se encontró ese usuario", type:"err" }); setInviting(false); return; }
       await sb("trip_members", { method:"POST", body:JSON.stringify({ trip_id:trip.id, user_id:ps[0].id, role:"viewer" }) });
-      setToast({ msg:"Invitacion enviada!" });
+      setToast({ msg:"¡Invitación enviada! ✓" });
       setEmail("");
       load();
     } catch(e) { setToast({ msg:e.message, type:"err" }); }
@@ -1002,7 +1152,11 @@ function MembersTab({ trip, session, onLogout }) {
       <div style={{ background:"white", borderRadius:16, padding:"16px", boxShadow:"var(--shadow)", marginBottom:20 }}>
         <div style={{ fontSize:12, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:10 }}>Invitar viajero</div>
         <div style={{ display:"flex", gap:8 }}>
-          <input value={email} onChange={e => setEmail(e.target.value)} placeholder="email@ejemplo.com" type="email" style={{ flex:1, padding:"11px 13px", border:"1.5px solid var(--border)", borderRadius:10, fontSize:14, background:"white" }}/>
+          <input value={email} onChange={e => setEmail(e.target.value)} placeholder="email@ejemplo.com" type="email"
+            style={{ flex:1, padding:"11px 13px", border:"1.5px solid var(--border)", borderRadius:10, fontSize:14, background:"white" }}
+            onFocus={e => e.target.style.borderColor="var(--yellow-dark)"}
+            onBlur={e => e.target.style.borderColor="var(--border)"}
+          />
           <button onClick={invite} disabled={inviting||!email} style={{ background:"var(--yellow)", border:"none", borderRadius:10, padding:"11px 16px", fontWeight:800, fontSize:14, flexShrink:0 }}>{inviting?"...":"Invitar"}</button>
         </div>
       </div>
@@ -1010,20 +1164,20 @@ function MembersTab({ trip, session, onLogout }) {
       <div style={{ fontSize:12, fontWeight:700, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:10 }}>Viajeros ({members.length})</div>
       {members.map(m => (
         <div key={m.id} style={{ background:"white", borderRadius:14, padding:"12px 16px", boxShadow:"var(--shadow)", marginBottom:8, display:"flex", alignItems:"center", gap:12 }}>
-          <div style={{ width:40, height:40, borderRadius:"50%", background:"var(--yellow)", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:800, fontSize:16, flexShrink:0 }}>
-            {(m.profiles?.full_name||"?")[0].toUpperCase()}
-          </div>
+          <Avatar name={m.profiles?.full_name || "?"} size={40} />
           <div style={{ flex:1 }}>
             <div style={{ fontWeight:700, fontSize:14 }}>{m.profiles?.full_name||"Usuario"}</div>
             <div style={{ fontSize:11, color:"var(--muted)", textTransform:"uppercase", letterSpacing:"0.04em" }}>{m.role==="owner"?"Organizador":"Viajero"}</div>
           </div>
-          {m.user_id===session.user.id && <div style={{ fontSize:11, color:"var(--blue)", fontWeight:700 }}>Tu</div>}
+          {m.user_id===session.user.id && <div style={{ fontSize:11, color:"var(--blue)", fontWeight:700, background:"#EBF5FF", padding:"4px 10px", borderRadius:20 }}>Tú</div>}
         </div>
       ))}
 
-      <button onClick={onLogout} style={{ width:"100%", marginTop:32, background:"#FEE2E2", border:"none", borderRadius:14, padding:"13px", fontSize:14, fontWeight:700, color:"var(--red)" }}>
-        Cerrar sesion
-      </button>
+      {/* Logout */}
+      <div style={{ marginTop:32, paddingBottom:8 }}>
+        <Btn variant="danger" onClick={onLogout}>🚪 Cerrar sesión</Btn>
+      </div>
+
       {toast && <Toast msg={toast.msg} type={toast.type} onClose={() => setToast(null)}/>}
     </div>
   );
@@ -1041,7 +1195,7 @@ const TABS = [
 function NavBtn({ tab, active, onClick }) {
   return (
     <button onClick={onClick} style={{ flex:1, border:"none", background:"transparent", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:"10px 4px 8px", position:"relative", WebkitTapHighlightColor:"transparent", minWidth:0 }}>
-      <div style={{ fontSize:22 }}>{tab.icon}</div>
+      <div style={{ fontSize:22, transition:"transform 0.15s", transform: active ? "scale(1.15)" : "scale(1)" }}>{tab.icon}</div>
       <div style={{ fontSize:10, fontWeight:active?800:600, color:active?"var(--dark)":"var(--muted)", marginTop:3, lineHeight:1 }}>{tab.label}</div>
       {active && <div style={{ position:"absolute", top:0, left:"15%", right:"15%", height:2.5, background:"var(--yellow-dark)", borderRadius:"0 0 2px 2px" }}/>}
     </button>
@@ -1050,35 +1204,31 @@ function NavBtn({ tab, active, onClick }) {
 
 function TripScreen({ trip, session, onBack, onLogout }) {
   const [tab, setTab] = useState("today");
-  const [placesKey, setPlacesKey] = useState(0);
   const status = tripStatus(trip.start_date, trip.end_date);
   const ss = STATUS_STYLES[status];
 
   return (
     <div style={{ height:"100vh", display:"flex", flexDirection:"column", background:"var(--bg)", overflow:"hidden" }}>
-      {/* Header */}
-      <div style={{ background:"white", borderBottom:"1px solid var(--border)", paddingTop:"calc(var(--sat) + 10px)", flexShrink:0 }}>
+      <div style={{ background:"white", borderBottom:"1px solid var(--border)", paddingTop:"calc(var(--sat) + 10px)", flexShrink:0, zIndex:10 }}>
         <div style={{ display:"flex", alignItems:"center", gap:10, padding:"0 16px 12px" }}>
           <button onClick={onBack} style={{ background:"var(--bg)", border:"none", borderRadius:10, width:36, height:36, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, flexShrink:0 }}>←</button>
           <div style={{ flex:1, minWidth:0 }}>
             <div style={{ fontFamily:"Nunito", fontWeight:900, fontSize:19, letterSpacing:"-0.3px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{trip.title}</div>
-            <div style={{ fontSize:12, color:"var(--muted)" }}>{fmtDate(trip.start_date)} -> {fmtDate(trip.end_date)}</div>
+            <div style={{ fontSize:12, color:"var(--muted)" }}>{fmtDate(trip.start_date)} → {fmtDate(trip.end_date)}</div>
           </div>
           <div style={{ fontSize:11, fontWeight:700, padding:"4px 10px", borderRadius:20, background:ss.bg, color:ss.color, flexShrink:0 }}>{ss.label}</div>
         </div>
       </div>
 
-      {/* Content */}
       <div style={{ flex:1, overflow:"hidden", display:"flex", flexDirection:"column" }}>
         {tab==="today"     && <TodayTab trip={trip} onSwitchToItinerary={() => setTab("itinerary")}/>}
         {tab==="itinerary" && <ItineraryTab trip={trip}/>}
-        {tab==="places"    && <PlacesTab trip={trip} key={placesKey}/>}
+        {tab==="places"    && <PlacesTab trip={trip}/>}
         {tab==="docs"      && <DocsTab trip={trip}/>}
         {tab==="members"   && <MembersTab trip={trip} session={session} onLogout={onLogout}/>}
       </div>
 
-      {/* Bottom nav */}
-      <div style={{ background:"white", borderTop:"1px solid var(--border)", flexShrink:0, display:"flex", paddingBottom:"max(var(--sab), 8px)" }}>
+      <div style={{ background:"white", borderTop:"1px solid var(--border)", flexShrink:0, display:"flex", paddingBottom:"max(env(safe-area-inset-bottom, 0px), 8px)" }}>
         {TABS.map(t => <NavBtn key={t.id} tab={t} active={tab===t.id} onClick={() => setTab(t.id)}/>)}
       </div>
     </div>
@@ -1100,13 +1250,35 @@ export default function App() {
   useEffect(() => {
     try {
       const s = JSON.parse(localStorage.getItem("jd_session")||"null");
-      if (s?.access_token) setSession(s);
+      if (s?.access_token) {
+        _session = s;
+        setSession(s);
+      }
     } catch(e) {}
+
+    // Register global session expired handler -> auto logout
+    _onSessionExpired = () => {
+      setSession(null);
+      setTrip(null);
+    };
+
+    return () => { _onSessionExpired = null; };
   }, []);
 
-  function logout() { localStorage.removeItem("jd_session"); setSession(null); setTrip(null); }
+  function logout() {
+    localStorage.removeItem("jd_session");
+    _session = null;
+    setSession(null);
+    setTrip(null);
+  }
 
-  if (!session) return <AuthScreen onAuth={s => { localStorage.setItem("jd_session", JSON.stringify(s)); setSession(s); }}/>;
+  function handleAuth(s) {
+    localStorage.setItem("jd_session", JSON.stringify(s));
+    _session = s;
+    setSession(s);
+  }
+
+  if (!session) return <AuthScreen onAuth={handleAuth}/>;
   if (trip) return <TripScreen trip={trip} session={session} onBack={() => setTrip(null)} onLogout={logout}/>;
-  return <TripsScreen session={session} onSelectTrip={setTrip}/>;
+  return <TripsScreen session={session} onSelectTrip={setTrip} onLogout={logout}/>;
 }
